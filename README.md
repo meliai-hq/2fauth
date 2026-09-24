@@ -109,12 +109,14 @@
 
 ```bash
 npx wrangler login
-npx wrangler kv namespace create USER_DATA
 ```
 
-将命令返回的 namespace ID 填入 `wrangler.toml` 的 `id`，并替换所有
-`YOUR_WORKER`、`YOUR_SUBDOMAIN`、`YOUR_GITHUB_USER_ID` 占位符。
-`name` 应与目标 Worker 名称一致。如果部署到已有 Worker，请保留实际使用的 KV 绑定和配置。
+当前仓库的 `wrangler.toml` 已配置 Worker `2fauth`、自定义域名 `2fa.meliai.app`
+和 GitHub 用户 ID `22048495`，并关闭 `workers.dev` 和预览 URL。
+`USER_DATA` 已绑定现有命名空间 `2fa-user-data`，无需重复创建。
+部署到其他账户时，请修改这些值、`routes` 中的域名和区域，以及 KV namespace ID。
+如果控制台已绑定 `USER_DATA`，请使用该绑定现有命名空间的 ID，不要新建命名空间替换已有数据。
+只有尚未创建 KV 时才执行 `npx wrangler kv namespace create USER_DATA`，并将返回的 ID 填入配置。
 
 完成上述 GitHub OAuth App 注册后，逐条设置密钥：
 
@@ -128,6 +130,8 @@ npx wrangler deploy
 
 密钥在交互提示中输入，不要提交到仓库。CLI 部署会采用 `wrangler.toml` 中的配置，
 不要保留占位值，也不要混用不同域名的回调配置。
+如果出现本地与远程配置不一致的警告，请先修正配置再部署，避免覆盖控制台设置。
+回调变量名是 `OAUTH_REDIRECT_URI`（不是 `AUTH_REDIRECT_URI`）。
 
 ### 其他 OAuth 服务
 
@@ -241,7 +245,7 @@ npx wrangler deploy
 ```
 2fa-secure-manager/
 ├── _worker.js            # 页面、API 和 OAuth 登录
-├── wrangler.toml         # Cloudflare Workers 配置（部署前替换占位值）
+├── wrangler.toml         # Cloudflare Workers 配置（已绑定 2fa-user-data）
 ├── oauth.test.mjs        # OAuth 登录回归检查
 └── README.md             # 项目文档
 ```

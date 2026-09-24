@@ -1,19 +1,23 @@
-name = "2fa-secure-manager"
+name = "2fauth"
 main = "_worker.js"
 compatibility_date = "2026-09-24"
-workers_dev = true
+workers_dev = false
+preview_urls = false
+routes = [
+    { pattern = "2fa.meliai.app", zone_name = "meliai.app", custom_domain = true }
+]
 
 [[kv_namespaces]]
 binding = "USER_DATA"
-# 替换为 npx wrangler kv namespace create USER_DATA 返回的 ID。
-id = "00000000000000000000000000000000"
+# 现有命名空间：2fa-user-data。
+id = "b52613dfed3d48699969a0d2c04b31a4"
 
 [vars]
 OAUTH_BASE_URL = "https://github.com"
-OAUTH_REDIRECT_URI = "https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/api/oauth/callback"
+OAUTH_REDIRECT_URI = "https://2fa.meliai.app/api/oauth/callback"
 # GitHub 数字用户 ID，必须保留引号；不是用户名或 OAuth Client ID。
-OAUTH_ID = "YOUR_GITHUB_USER_ID"
-ALLOWED_ORIGINS = "https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev"
+OAUTH_ID = "22048495"
+ALLOWED_ORIGINS = "https://2fa.meliai.app"
 
 # 用 wrangler secret put 设置 OAUTH_CLIENT_ID、OAUTH_CLIENT_SECRET、
 # JWT_SECRET 和 ENCRYPTION_KEY；不要把密钥写进此文件。
