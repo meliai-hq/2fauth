@@ -631,6 +631,14 @@ async function getAuthenticatedUser(request, env) {
 }
 
 // ===== OAuth相关函数 =====
+function validateOAuthConfig(env) {
+    const required = ['OAUTH_BASE_URL', 'OAUTH_CLIENT_ID', 'OAUTH_CLIENT_SECRET', 'OAUTH_REDIRECT_URI', 'OAUTH_ID', 'JWT_SECRET'];
+    const missing = required.filter(name => typeof env[name] !== 'string' || !env[name].trim());
+    if (missing.length) {
+        throw new OAuthError(`Worker 缺少配置：${missing.join('、')}，请在 Variables and Secrets 中设置后重新部署`, 'MISSING_CONFIG');
+    }
+}
+
 function getOAuthEndpoints(oauthBaseUrl) {
     const baseUrl = oauthBaseUrl.replace(/\/$/, '');
     const isGitHub = baseUrl === 'https://github.com';
@@ -669,7 +677,7 @@ async function fetchOAuthUser(accessToken, oauthBaseUrl) {
         } : user;
     } catch (error) {
         if (error instanceof OAuthError) throw error;
-        throw new OAuthError(`OAuth user fetch error: ${error.message}`, 'NETWORK_ERROR');
+        throw new OAuthError('无法读取 OAuth 用户信息，请查看 Worker 日志并重试', 'NETWORK_ERROR');
     }
 }
 
@@ -741,6 +749,7 @@ async function handleOAuthAuthorize(request, env) {
     }
     
     try {
+        validateOAuthConfig(env);
         const state = crypto.randomUUID();
         const params = new URLSearchParams({
             response_type: 'code',
@@ -836,9 +845,8 @@ async function handleOAuthCallback(request, env) {
         }
         
         return new Response(JSON.stringify({ 
-            error: 'OAuth authentication failed',
-            message: 'Internal server error',
-            details: error.message
+            error: error instanceof OAuthError ? error.message : '登录处理失败，请查看 Worker 日志后重试',
+            code: error instanceof OAuthError ? error.code : 'INTERNAL_ERROR'
         }), {
             status: 500,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' }
@@ -901,6 +909,8 @@ async function processOAuthCode(code, state, clientIP, request, env, corsHeaders
             });
         }
         
+        validateOAuthConfig(env);
+
         // 获取访问令牌
         const tokenResponse = await fetch(getOAuthEndpoints(env.OAUTH_BASE_URL).token, {
             method: 'POST',
@@ -918,14 +928,15 @@ async function processOAuthCode(code, state, clientIP, request, env, corsHeaders
             })
         });
         
-        if (!tokenResponse.ok) {
-            const errorText = await tokenResponse.text();
-            throw new OAuthError(`Token exchange failed: ${tokenResponse.status} - ${errorText}`, 'TOKEN_EXCHANGE_FAILED');
-        }
-        
-        const tokenData = await tokenResponse.json();
-        if (!tokenData.access_token) {
-            throw new OAuthError('No access token received', 'NO_ACCESS_TOKEN');
+        const tokenData = await tokenResponse.json().catch(() => null);
+        if (!tokenResponse.ok || tokenData?.error || !tokenData?.access_token) {
+            const messages = {
+                incorrect_client_credentials: 'GitHub Client ID 或 Client Secret 不正确，请检查 Worker 中的 OAUTH_CLIENT_ID 和 OAUTH_CLIENT_SECRET',
+                redirect_uri_mismatch: 'GitHub 回调地址不匹配，请检查 OAuth App 的回调地址与 OAUTH_REDIRECT_URI 是否一致',
+                bad_verification_code: 'GitHub 授权码已失效或已使用，请返回首页重新登录，不要刷新回调页面'
+            };
+            const message = Object.hasOwn(messages, tokenData?.error) ? messages[tokenData.error] : `OAuth 令牌交换失败（HTTP ${tokenResponse.status}），请检查客户端配置后重新登录`;
+            throw new OAuthError(message, 'TOKEN_EXCHANGE_FAILED');
         }
         
         // 获取用户信息
@@ -2665,7 +2676,7 @@ header h1 {
                 refreshAccounts();
                 startSessionTimer();
             } else {
-                logout();
+                logout(true);
             }
             setupEventListeners();
         }
@@ -2673,9 +2684,11 @@ header h1 {
         function isTokenValid() {
             if (!authToken || !loginTime) return false;
             try {
-                const payload = JSON.parse(atob(authToken.split('.')[1]));
+                const payloadB64 = authToken.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+                const payloadBytes = Uint8Array.from(atob(payloadB64), c => c.charCodeAt(0));
+                const payload = JSON.parse(new TextDecoder().decode(payloadBytes));
                 const now = Math.floor(Date.now() / 1000);
-                return payload.exp > now;
+                return Number.isFinite(payload.exp) && payload.exp > now;
             } catch {
                 return false;
             }
@@ -2695,7 +2708,7 @@ header h1 {
                 
                 if (timeLeft <= 0) {
                     showFloatingMessage('🔒 会话已过期，请重新登录', 'warning');
-                    logout();
+                    logout(true);
                     return;
                 }
                 
@@ -2794,7 +2807,7 @@ header h1 {
             }
         }
         
-        function logout() {
+        function logout(silent = false) {
             authToken = null;
             loginTime = null;
             userInfo = null;
@@ -2811,7 +2824,7 @@ header h1 {
             
             stopCamera();
             showLoginSection();
-            showFloatingMessage('✅ 已安全退出', 'success');
+            if (!silent) showFloatingMessage('✅ 已安全退出', 'success');
         }
         
         function handleUnauthorized() {

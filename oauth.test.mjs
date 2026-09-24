@@ -1,6 +1,44 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { runInNewContext } from 'node:vm';
 import worker from './_worker.js';
+
+test('homepage restores Base64URL sessions and rejects expired or malformed tokens', async () => {
+    const html = await (await worker.fetch(new Request('https://2fa.example/'), {
+        OAUTH_BASE_URL: 'https://github.com'
+    })).text();
+    const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].at(-1)[1];
+    const userInfo = { nickname: '测试 🔐😀' };
+    const payload = { userInfo, exp: Math.floor(Date.now() / 1000) + 3600 };
+    const tokenFor = (value) => `header.${Buffer.from(JSON.stringify(value)).toString('base64url')}.signature`;
+    const validToken = tokenFor(payload);
+    assert.match(validToken.split('.')[1], /[-_]/, 'exercise Base64URL characters rejected by plain atob');
+    for (const [token, valid] of [
+        [validToken, true],
+        [tokenFor({ ...payload, exp: 1 }), false],
+        ['malformed', false],
+        [null, false]
+    ]) {
+        const storage = new Map([['authToken', token], ['loginTime', String(Date.now())], ['userInfo', JSON.stringify(userInfo)]]);
+        const events = [];
+        runInNewContext(script + `
+            showMainSection = () => events.push('main');
+            showLoginSection = () => events.push('login');
+            refreshAccounts = () => {};
+            startSessionTimer = () => {};
+            setupEventListeners = () => {};
+            stopCamera = () => {};
+            showFloatingMessage = message => events.push(message);
+            initializeApp();
+        `, {
+            localStorage: { getItem: key => storage.get(key), removeItem: key => storage.delete(key) },
+            document: { addEventListener() {} },
+            atob, TextDecoder, Uint8Array, events
+        });
+        assert.deepEqual(events, [valid ? 'main' : 'login']);
+        assert.equal(storage.has('authToken'), valid);
+    }
+});
 
 test('GitHub OAuth callback, user restriction, and signed session', async (t) => {
     const env = {
@@ -103,4 +141,42 @@ test('existing OAuth service retains its endpoints and user mapping', async (t) 
     }), env);
     assert.equal(response.status, 200);
     assert.equal((await response.json()).userInfo.username, 'original-user');
+});
+
+test('OAuth failures identify missing secrets or GitHub errors without exposing credentials', async (t) => {
+    const env = {
+        OAUTH_BASE_URL: 'https://github.com', OAUTH_CLIENT_ID: 'client',
+        OAUTH_CLIENT_SECRET: 'private-client-secret', OAUTH_REDIRECT_URI: 'https://2fa.example/api/oauth/callback',
+        OAUTH_ID: '12345', JWT_SECRET: 'private-jwt-secret'
+    };
+    t.mock.method(console, 'log', () => {});
+    t.mock.method(console, 'error', () => {});
+    let reply;
+    const fetchMock = t.mock.method(globalThis, 'fetch', async () => Response.json(reply));
+    const cases = [
+        [{ ...env, JWT_SECRET: undefined }, null, 'JWT_SECRET', 'MISSING_CONFIG'],
+        [{ ...env, OAUTH_CLIENT_SECRET: '' }, null, 'OAUTH_CLIENT_SECRET', 'MISSING_CONFIG'],
+        [env, { error: 'incorrect_client_credentials' }, 'Client ID 或 Client Secret 不正确', 'TOKEN_EXCHANGE_FAILED'],
+        [env, { error: 'redirect_uri_mismatch' }, '回调地址不匹配', 'TOKEN_EXCHANGE_FAILED'],
+        [env, { error: 'bad_verification_code' }, '授权码已失效或已使用', 'TOKEN_EXCHANGE_FAILED'],
+        [env, { error: 'unexpected', error_description: 'private-client-secret' }, '令牌交换失败', 'TOKEN_EXCHANGE_FAILED']
+    ];
+    for (const [index, [config, body, message, code]] of cases.entries()) {
+        reply = body;
+        const before = fetchMock.mock.callCount();
+        const response = await worker.fetch(new Request(env.OAUTH_REDIRECT_URI, {
+            method: 'POST',
+            headers: { Cookie: 'oauth_state=test-state', 'CF-Connecting-IP': `192.0.2.${index + 1}` },
+            body: JSON.stringify({ code: 'code', state: 'test-state' })
+        }), config);
+        assert.equal(response.status, 500);
+        const data = await response.json();
+        assert.equal(data.code, code);
+        assert.ok(data.error.includes(message));
+        assert.ok(!JSON.stringify(data).includes('private-'));
+        assert.equal(fetchMock.mock.callCount() - before, body ? 1 : 0);
+    }
+    const authorize = await worker.fetch(new Request('https://2fa.example/api/oauth/authorize'), { ...env, JWT_SECRET: '' });
+    assert.equal(authorize.status, 500);
+    assert.match(await authorize.text(), /JWT_SECRET/);
 });
