@@ -583,7 +583,7 @@ async function generateSecureJWT(payload, secret) {
     };
     
     const headerB64 = btoa(JSON.stringify(header)).replace(/[+/=]/g, (m) => ({'+':'-','/':'_','=':''}[m]));
-    const payloadB64 = btoa(JSON.stringify(enhancedPayload)).replace(/[+/=]/g, (m) => ({'+':'-','/':'_','=':''}[m]));
+    const payloadB64 = btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(enhancedPayload)))).replace(/[+/=]/g, (m) => ({'+':'-','/':'_','=':''}[m]));
     
     const data = `${headerB64}.${payloadB64}`;
     const encoder = new TextEncoder();
@@ -609,7 +609,8 @@ async function verifySecureJWT(token, secret) {
         const isValid = await crypto.subtle.verify('HMAC', cryptoKey, signature, encoder.encode(data));
         
         if (isValid) {
-            const payload = JSON.parse(atob(payloadB64.replace(/[-_]/g, (m) => ({'-':'+','_':'/'}[m]))));
+            const payloadBytes = Uint8Array.from(atob(payloadB64.replace(/[-_]/g, (m) => ({'-':'+','_':'/'}[m]))), c => c.charCodeAt(0));
+            const payload = JSON.parse(new TextDecoder().decode(payloadBytes));
             if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) return null;
             return payload;
         }
@@ -630,9 +631,21 @@ async function getAuthenticatedUser(request, env) {
 }
 
 // ===== OAuth相关函数 =====
+function getOAuthEndpoints(oauthBaseUrl) {
+    const baseUrl = oauthBaseUrl.replace(/\/$/, '');
+    const isGitHub = baseUrl === 'https://github.com';
+    return {
+        authorize: `${baseUrl}${isGitHub ? '/login/oauth/authorize' : '/oauth2/authorize'}`,
+        token: `${baseUrl}${isGitHub ? '/login/oauth/access_token' : '/oauth2/token'}`,
+        user: isGitHub ? 'https://api.github.com/user' : `${baseUrl}/api/user`,
+        isGitHub
+    };
+}
+
 async function fetchOAuthUser(accessToken, oauthBaseUrl) {
     try {
-        const response = await fetch(`${oauthBaseUrl}/api/user`, {
+        const endpoints = getOAuthEndpoints(oauthBaseUrl);
+        const response = await fetch(endpoints.user, {
             method: 'GET',
             headers: {
                 'Authorization': `Bearer ${accessToken}`,
@@ -646,7 +659,14 @@ async function fetchOAuthUser(accessToken, oauthBaseUrl) {
             throw new OAuthError(`Failed to fetch user info: ${response.status}`, 'FETCH_USER_FAILED');
         }
         
-        return await response.json();
+        const user = await response.json();
+        return endpoints.isGitHub ? {
+            id: user.id,
+            username: user.login,
+            nickname: user.name,
+            email: user.email,
+            avatar_template: user.avatar_url
+        } : user;
     } catch (error) {
         if (error instanceof OAuthError) throw error;
         throw new OAuthError(`OAuth user fetch error: ${error.message}`, 'NETWORK_ERROR');
@@ -729,7 +749,7 @@ async function handleOAuthAuthorize(request, env) {
             state: state
         });
         
-        const authUrl = `${env.OAUTH_BASE_URL}/oauth2/authorize?${params}`;
+        const authUrl = `${getOAuthEndpoints(env.OAUTH_BASE_URL).authorize}?${params}`;
         
         return new Response(null, {
             status: 302,
@@ -882,7 +902,7 @@ async function processOAuthCode(code, state, clientIP, request, env, corsHeaders
         }
         
         // 获取访问令牌
-        const tokenResponse = await fetch(`${env.OAUTH_BASE_URL}/oauth2/token`, {
+        const tokenResponse = await fetch(getOAuthEndpoints(env.OAUTH_BASE_URL).token, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded',

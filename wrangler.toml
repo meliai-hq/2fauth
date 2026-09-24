@@ -1,0 +1,19 @@
+name = "2fa-secure-manager"
+main = "_worker.js"
+compatibility_date = "2026-09-24"
+workers_dev = true
+
+[[kv_namespaces]]
+binding = "USER_DATA"
+# 替换为 npx wrangler kv namespace create USER_DATA 返回的 ID。
+id = "00000000000000000000000000000000"
+
+[vars]
+OAUTH_BASE_URL = "https://github.com"
+OAUTH_REDIRECT_URI = "https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/api/oauth/callback"
+# GitHub 数字用户 ID，必须保留引号；不是用户名或 OAuth Client ID。
+OAUTH_ID = "YOUR_GITHUB_USER_ID"
+ALLOWED_ORIGINS = "https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev"
+
+# 用 wrangler secret put 设置 OAUTH_CLIENT_ID、OAUTH_CLIENT_SECRET、
+# JWT_SECRET 和 ENCRYPTION_KEY；不要把密钥写进此文件。

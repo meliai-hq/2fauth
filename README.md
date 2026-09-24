@@ -43,118 +43,111 @@
 
 ## 🚀 快速开始
 
-### 环境要求
+### 使用 GitHub 登录，在 Cloudflare 控制台部署
 
-  * Cloudflare Workers 账号
-  * Wrangler CLI 工具
-  * OAuth 2.0 认证服务器（如 GitHub、GitLab、自建等）
+本项目的页面和接口都在 `_worker.js` 中，无需构建。当前版本会根据
+`OAUTH_BASE_URL=https://github.com` 自动使用 GitHub OAuth 接口。
 
-### 部署步骤
+1. **创建 Worker 并部署代码**
 
-1.  **克隆仓库**
+   在 Cloudflare **Workers & Pages** 创建 Worker（也可使用已有 Worker），
+   打开 **Edit code**，将 `_worker.js` 的全部内容替换到入口文件，点击 **Deploy**。
+   记下实际访问地址，例如 `https://2fa-secure-manager.your-subdomain.workers.dev`。
+   如使用自定义域名，请先绑定域名，以下地址统一使用该域名。
 
-    ```bash
-    git clone https://github.com/ilikeeu/2fauth.git
-    cd 2fauth
-    ```
+2. **创建并绑定 KV**
 
-2.  **安装依赖**
+   在 Cloudflare **Workers KV** 创建命名空间，例如 `2fa-user-data`。
+   打开 Worker 的 **Bindings**，添加 KV Namespace 绑定，变量名必须是 `USER_DATA`，
+   选择刚创建的命名空间。
 
-    ```bash
-    npm install -g wrangler
-    ```
+3. **创建 GitHub OAuth App**
 
-3.  **创建 KV 命名空间**
+   打开 https://github.com/settings/applications/new ，填写：
 
-    ```bash
-    wrangler kv:namespace create "USER_DATA"
-    wrangler kv:namespace create "USER_DATA" --preview
-    ```
+   - **Application name**：自定，例如 `My 2FA`。
+   - **Homepage URL**：Worker 的完整 HTTPS 地址。
+   - **Authorization callback URL**：`https://你的域名/api/oauth/callback`。
 
-4.  **配置 `wrangler.toml`**
+   注册后记下 **Client ID**，点击 **Generate a new client secret** 并保存密钥。
+   创建的是 OAuth App，不是 GitHub App，也不需要 Personal Access Token。
 
-    ```toml
-    name = "2fa-secure-manager"
-    main = "src/index.js"
-    compatibility_date = "2024-01-15"
+4. **获取自己的 GitHub 数字用户 ID**
 
-    [[kv_namespaces]]
-    binding = "USER_DATA"
-    id = "your-kv-namespace-id"
-    preview_id = "your-preview-kv-namespace-id"
+   浏览器打开 `https://api.github.com/users/你的GitHub用户名`，找到顶层 `id` 字段。
+   `OAUTH_ID` 填这个数字的文本值，例如 `12345678`，不是用户名、`node_id` 或 Client ID。
+   当前应用只允许这个用户登录。
 
-    [vars]
-    OAUTH_BASE_URL = "https://your-oauth-server.com"
-    OAUTH_REDIRECT_URI = "https://your-domain.workers.dev/api/oauth/callback"
-    OAUTH_ID = "authorized_user_id"
+5. **设置 Worker 变量**
 
-    [env.production.vars]
-    ALLOWED_ORIGINS = "https://your-domain.workers.dev"
-    ```
+   在 **Settings → Variables and Secrets** 中添加：
 
-5.  **设置环境变量**
+   | 名称 | 类型 | 值 |
+   | :--- | :--- | :--- |
+   | `OAUTH_BASE_URL` | Text | `https://github.com` |
+   | `OAUTH_CLIENT_ID` | Secret | GitHub OAuth App 的 Client ID |
+   | `OAUTH_CLIENT_SECRET` | Secret | GitHub OAuth App 的 Client Secret |
+   | `OAUTH_REDIRECT_URI` | Text | `https://你的域名/api/oauth/callback` |
+   | `OAUTH_ID` | Text | 你的 GitHub 数字用户 ID |
+   | `JWT_SECRET` | Secret | 独立生成的随机密钥 |
+   | `ENCRYPTION_KEY` | Secret | 另一串独立生成的随机密钥 |
+   | `ALLOWED_ORIGINS` | Text | `https://你的域名`，末尾不加 `/` |
 
-    ```bash
-    # OAuth 配置
-    wrangler secret put OAUTH_CLIENT_ID
-    wrangler secret put OAUTH_CLIENT_SECRET
+   在本机运行两次 `openssl rand -hex 32`，分别生成 `JWT_SECRET` 和 `ENCRYPTION_KEY`。
+   妥善保存 `ENCRYPTION_KEY`：更换它不会自动迁移数据，已有数据将无法解密。
+   GitHub OAuth App 的回调地址必须与 `OAUTH_REDIRECT_URI` 完全一致。
 
-    # 安全密钥
-    wrangler secret put JWT_SECRET
-    wrangler secret put ENCRYPTION_KEY
-    ```
+6. **保存并部署配置，验证登录**
 
-6.  **部署到 Cloudflare Workers**
+   访问首页，点击“第三方授权登录”，应跳转到 GitHub；授权后返回应用。
+   添加测试账户并刷新页面，确认账户可以读取。
+   应用不请求仓库权限或私有邮箱权限，GitHub 未公开邮箱时，页面邮箱为空是正常情况。
 
-    ```bash
-    wrangler deploy
-    ```
+### 使用 Wrangler CLI 部署
 
------
+需要 Node.js 22 或更新版本。仓库已提供 `wrangler.toml`，入口是 `_worker.js`。
 
-## ⚙️ 配置说明
-
-### 必需的环境变量
-
-| 变量名             | 描述           | 示例                           |
-| :----------------- | :------------- | :----------------------------- |
-| `OAUTH_CLIENT_ID`  | OAuth 客户端 ID | `your_oauth_client_id`         |
-| `OAUTH_CLIENT_SECRET` | OAuth 客户端密钥 | `your_oauth_client_secret`     |
-| `OAUTH_BASE_URL`   | OAuth 服务器地址 | `https://oauth.example.com`    |
-| `OAUTH_REDIRECT_URI` | OAuth 回调地址 | `https://your-app.workers.dev/api/oauth/callback` |
-| `OAUTH_ID`         | 授权用户 ID    | `12345`                        |
-| `JWT_SECRET`       | JWT 签名密钥   | `your_strong_jwt_secret`       |
-| `ENCRYPTION_KEY`   | 数据加密密钥   | `your_encryption_key`          |
-
-### 可选的环境变量
-
-| 变量名           | 描述         | 默认值 |
-| :--------------- | :----------- | :----- |
-| `ALLOWED_ORIGINS` | 允许的跨域来源 | `*`    |
-
-### OAuth 服务器配置
-
-系统支持任何标准的 OAuth 2.0 服务器。以下是一些常见的配置示例：
-
-#### GitHub OAuth App
-
-```
-OAUTH_BASE_URL=https://github.com
-OAUTH_CLIENT_ID=your_github_client_id
-OAUTH_CLIENT_SECRET=your_github_client_secret
-OAUTH_REDIRECT_URI=https://your-app.workers.dev/api/oauth/callback
-OAUTH_ID=your_github_user_id
+```bash
+npx wrangler login
+npx wrangler kv namespace create USER_DATA
 ```
 
-#### 自建 OAuth 服务器
+将命令返回的 namespace ID 填入 `wrangler.toml` 的 `id`，并替换所有
+`YOUR_WORKER`、`YOUR_SUBDOMAIN`、`YOUR_GITHUB_USER_ID` 占位符。
+`name` 应与目标 Worker 名称一致。如果部署到已有 Worker，请保留实际使用的 KV 绑定和配置。
 
+完成上述 GitHub OAuth App 注册后，逐条设置密钥：
+
+```bash
+npx wrangler secret put OAUTH_CLIENT_ID
+npx wrangler secret put OAUTH_CLIENT_SECRET
+npx wrangler secret put JWT_SECRET
+npx wrangler secret put ENCRYPTION_KEY
+npx wrangler deploy
 ```
-OAUTH_BASE_URL=https://your-oauth-server.com
-OAUTH_CLIENT_ID=your_client_id
-OAUTH_CLIENT_SECRET=your_client_secret
-OAUTH_REDIRECT_URI=https://your-app.workers.dev/api/oauth/callback
-OAUTH_ID=your_user_id
-```
+
+密钥在交互提示中输入，不要提交到仓库。CLI 部署会采用 `wrangler.toml` 中的配置，
+不要保留占位值，也不要混用不同域名的回调配置。
+
+### 其他 OAuth 服务
+
+`OAUTH_BASE_URL` 为 `https://github.com` 时使用：
+
+- 授权：`https://github.com/login/oauth/authorize`
+- 令牌：`https://github.com/login/oauth/access_token`
+- 用户信息：`https://api.github.com/user`
+
+其他地址沿用原项目的接口约定：`/oauth2/authorize`、`/oauth2/token`、`/api/user`，
+用户信息需返回顶层 `id`。这不代表任意 OAuth 服务都可以直接接入；接口路径或响应结构
+不同的服务需要适配。GitHub Enterprise 不在当前适配范围内。
+
+### 常见问题
+
+- **授权页面 404**：确认使用更新后的 `_worker.js`，且 `OAUTH_BASE_URL` 是 `https://github.com`。
+- **回调地址不匹配**：检查 GitHub 应用配置、Worker 变量和实际访问域名是否一致。
+- **Unauthorized user**：`OAUTH_ID` 不是当前登录 GitHub 账户的数字用户 ID。
+- **Token exchange failed / No access token received**：检查 Client ID、Client Secret 和回调地址，重新从首页发起登录。
+- **读取或保存账户失败**：检查 KV 绑定名是否为 `USER_DATA`，以及加密密钥是否被更换。
 
 -----
 
@@ -237,7 +230,7 @@ OAUTH_ID=your_user_id
   * **强密码策略**：导出密码至少 12 个字符
   * **定期备份**：建议每周进行一次完整备份
   * **环境隔离**：生产环境使用独立的 OAuth 应用
-  * **密钥轮换**：定期更新 JWT 和加密密钥
+  * **密钥轮换**：更新 JWT 密钥会使现有会话失效；更换加密密钥前必须导出备份并规划数据迁移，不能直接替换
 
 -----
 
@@ -247,14 +240,19 @@ OAUTH_ID=your_user_id
 
 ```
 2fa-secure-manager/
-├── src/
-│   └── index.js          # 主应用文件
-├── wrangler.toml         # Cloudflare Workers 配置
-├── package.json          # 项目依赖
+├── _worker.js            # 页面、API 和 OAuth 登录
+├── wrangler.toml         # Cloudflare Workers 配置（部署前替换占位值）
+├── oauth.test.mjs        # OAuth 登录回归检查
 └── README.md             # 项目文档
 ```
 
 ### 本地开发
+
+  * **验证 OAuth 流程**（模拟服务响应，无需真实凭据）
+    ```bash
+    node --test oauth.test.mjs
+    ```
+
 
   * **启动开发服务器**
     ```bash
