@@ -989,7 +989,7 @@ async function processOAuthCode(code, state, clientIP, request, env, corsHeaders
 }
 
 // ===== HTML 页面（压缩版） =====
-function getMainHTML() {
+function getMainHTML(isGitHub = false) {
     return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -2363,12 +2363,10 @@ header h1 {
                     <p style="color: #6b7280; margin: 1rem 0;">使用第三方授权登录系统</p>
                     
 		<button onclick="startOAuthLogin()" class="oauth-login-btn">
-		    <span class="oauth-icon">
-		        <img src="https://linux.do/logo-256.svg" 
-		             alt="Logo" 
-		             style="width: 40px; height: 40px; object-fit: contain;">
+		    <span class="oauth-icon" aria-hidden="true">
+		        <i class="${isGitHub ? 'fab fa-github' : 'fas fa-sign-in-alt'}"></i>
 		    </span>
-		    <span>使用Linux.do账号登录</span>
+		    <span>${isGitHub ? '使用 GitHub 账号登录' : '使用第三方账号登录'}</span>
 		</button>
 		
 		<!-- GitHub 开源仓库链接 -->
@@ -5857,7 +5855,7 @@ export default {
         
         try {
             if (path === '/' || path === '/index.html') {
-                const html = getMainHTML();
+                const html = getMainHTML(getOAuthEndpoints(env.OAUTH_BASE_URL || '').isGitHub);
                 return new Response(html, {
                     headers: { 
                         'Content-Type': 'text/html',
