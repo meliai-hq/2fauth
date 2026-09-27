@@ -630,6 +630,60 @@ async function getAuthenticatedUser(request, env) {
     return payload?.userInfo || null;
 }
 
+async function hashApiToken(token) {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
+    return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function loadApiKeyConfig(env) {
+    const saved = await env.USER_DATA.get('api_key_config');
+    // 保留停用记录，防止停用后重新启用旧的环境变量 Token。
+    if (saved !== null) return { ...JSON.parse(saved), source: 'managed' };
+    const token = env.API_TOKEN;
+    const valid = typeof token === 'string' && token.length >= 32 && token.length <= 512;
+    return { hash: valid ? await hashApiToken(token) : null, source: 'environment', updatedAt: null };
+}
+
+async function hasValidApiToken(request, env) {
+    const authorization = request.headers.get('Authorization');
+    if (!authorization?.startsWith('Bearer ')) return false;
+    const token = authorization.substring(7);
+    if (token.length < 32 || token.length > 512) return false;
+
+    const config = await loadApiKeyConfig(env);
+    if (typeof config.hash !== 'string' || !/^[a-f0-9]{64}$/.test(config.hash)) return false;
+    const actual = await hashApiToken(token);
+    // 比较固定长度摘要，遍历全部字节，避免按 Token 前缀提前返回。
+    let difference = 0;
+    for (let i = 0; i < actual.length; i++) difference |= config.hash.charCodeAt(i) ^ actual.charCodeAt(i);
+    return difference === 0;
+}
+
+async function handleApiKey(request, env) {
+    const headers = { ...getCorsHeaders(request, env), 'Content-Type': 'application/json', 'Cache-Control': 'no-store' };
+    if (!await getAuthenticatedUser(request, env)) {
+        return Response.json({ error: 'Unauthorized' }, { status: 401, headers });
+    }
+    if (!['GET', 'POST', 'DELETE'].includes(request.method)) {
+        return Response.json({ error: 'Method not allowed' }, { status: 405, headers });
+    }
+    try {
+        if (request.method === 'GET') {
+            const config = await loadApiKeyConfig(env);
+            return Response.json({ enabled: Boolean(config.hash), source: config.source, updatedAt: config.updatedAt }, { headers });
+        }
+        const apiKey = request.method === 'POST'
+            ? '2fa_' + Array.from(crypto.getRandomValues(new Uint8Array(32)), byte => byte.toString(16).padStart(2, '0')).join('')
+            : null;
+        const config = { hash: apiKey ? await hashApiToken(apiKey) : null, updatedAt: new Date().toISOString() };
+        await env.USER_DATA.put('api_key_config', JSON.stringify(config));
+        await logSecurityEvent(apiKey ? 'API_KEY_GENERATED' : 'API_KEY_DISABLED', {}, request);
+        return Response.json({ enabled: Boolean(apiKey), source: 'managed', updatedAt: config.updatedAt, ...(apiKey && { apiKey }) }, { headers });
+    } catch {
+        return Response.json({ error: 'API Key 配置操作失败，请稍后重试' }, { status: 500, headers });
+    }
+}
+
 // ===== OAuth相关函数 =====
 function validateOAuthConfig(env) {
     const required = ['OAUTH_BASE_URL', 'OAUTH_CLIENT_ID', 'OAUTH_CLIENT_SECRET', 'OAUTH_REDIRECT_URI', 'OAUTH_ID', 'JWT_SECRET'];
@@ -1195,6 +1249,13 @@ header h1 {
 
 .tab-content.active {
     display: block;
+}
+
+#apiKeyTab .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
 }
 
 /* 按钮样式 */
@@ -2410,6 +2471,7 @@ header h1 {
                     <button class="tab-btn" data-tab="import" onclick="showTabByButton(this, 'import')">📥 导入数据</button>
                     <button class="tab-btn" data-tab="export" onclick="showTabByButton(this, 'export')">📤 导出数据</button>
                     <button class="tab-btn" data-tab="webdav" onclick="showTabByButton(this, 'webdav')">☁️ WebDAV备份</button>
+                    <button class="tab-btn" data-tab="apiKey" onclick="showTabByButton(this, 'apiKey')">🔑 API Key</button>
                 </div>
                 
                 <div id="accountsTab" class="tab-content active">
@@ -2562,6 +2624,33 @@ header h1 {
                     </div>
                 </div>
                 
+                <div id="apiKeyTab" class="tab-content">
+                    <div class="card">
+                        <h2>API Key 管理</h2>
+                        <div class="security-notice info">
+                            API Key 可读取全部账户及其长期 2FA 密钥，仅授予读取权限。请只交给可信的程序，并妥善保存。
+                        </div>
+                        <p id="apiKeyStatus" role="status" aria-live="polite" style="margin: 1rem 0;">正在加载…</p>
+                        <div style="display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.5rem;">
+                            <button id="apiKeyGenerate" onclick="manageApiKey('POST')" class="btn btn-primary" disabled>生成 API Key</button>
+                            <button id="apiKeyDisable" onclick="manageApiKey('DELETE')" class="btn btn-danger" disabled>停用</button>
+                            <button id="apiKeyRefresh" onclick="manageApiKey('GET')" class="btn btn-secondary">刷新状态</button>
+                        </div>
+                        <div id="apiKeyReveal" class="hidden">
+                            <div class="form-group">
+                                <label for="apiKeyValue">新 API Key（仅本次显示）</label>
+                                <input id="apiKeyValue" type="text" readonly autocomplete="off" spellcheck="false">
+                            </div>
+                            <button onclick="copyApiKey()" class="btn btn-secondary btn-small">复制 API Key</button>
+                            <p style="margin: 1rem 0;">请现在保存。离开此面板或刷新后无法再次查看，遗失时请重新生成。</p>
+                        </div>
+                        <h3>调用方式</h3>
+                        <p style="margin: 1rem 0;">将 Key 设置为调用端的 API_TOKEN 环境变量，然后执行：</p>
+                        <pre id="apiKeyExample" style="padding: 1rem; background: #f3f4f6; border-radius: 12px; white-space: pre-wrap; overflow-wrap: anywhere;"></pre>
+                        <p style="margin-top: 1rem;">返回的 secret 是 Base32 长期密钥。Key 不自动过期；重新生成或停用后，旧 Key 将失效。配置同步可能需要约一分钟或更久。</p>
+                    </div>
+                </div>
+
                 <div id="webdavTab" class="tab-content">
                     <div class="card">
                         <h2>WebDAV 自动备份</h2>
@@ -2657,6 +2746,8 @@ header h1 {
         let scanInterval = null;
         let webdavConfigs = [];
         let currentWebdavConfig = null;
+        let apiKeyEnabled = null;
+        let apiKeyBusy = false;
         
         const SECURITY_CONFIG = {
             SESSION_TIMEOUT: 2 * 60 * 60 * 1000,
@@ -3013,6 +3104,8 @@ header h1 {
         }
         
         function showLoginSection() {
+            clearApiKey();
+            apiKeyEnabled = null;
             document.getElementById('loginSection').classList.remove('hidden');
             document.getElementById('mainSection').classList.add('hidden');
             document.getElementById('userInfo').classList.add('hidden');
@@ -3038,6 +3131,7 @@ header h1 {
         }
         
         function showTabByButton(buttonElement, tabName) {
+            clearApiKey();
             document.querySelectorAll('.tab-content').forEach(tab => {
                 tab.classList.remove('active');
             });
@@ -3053,6 +3147,70 @@ header h1 {
                 refreshAccounts();
             } else if (tabName === 'webdav') {
                 loadWebDAVConfigs();
+            } else if (tabName === 'apiKey') {
+                manageApiKey('GET');
+            }
+        }
+
+        function clearApiKey() {
+            document.getElementById('apiKeyValue').value = '';
+            document.getElementById('apiKeyReveal').classList.add('hidden');
+        }
+
+        async function manageApiKey(method) {
+            if (apiKeyBusy || !authToken) return;
+            if (method === 'POST' && apiKeyEnabled && !confirm('重新生成后旧 API Key 将失效，是否继续？')) return;
+            if (method === 'DELETE' && !confirm('停用后，使用此 API Key 的程序将无法读取账户，是否继续？')) return;
+            apiKeyBusy = true;
+            const session = authToken;
+            const status = document.getElementById('apiKeyStatus');
+            const generate = document.getElementById('apiKeyGenerate');
+            const disable = document.getElementById('apiKeyDisable');
+            const refresh = document.getElementById('apiKeyRefresh');
+            generate.disabled = disable.disabled = refresh.disabled = true;
+            status.textContent = '正在处理…';
+            document.getElementById('apiKeyExample').textContent = 'curl --fail-with-body -sS ' + window.location.origin + '/api/accounts -H "Authorization: Bearer $API_TOKEN"';
+            if (method === 'GET') clearApiKey();
+            try {
+                const response = await fetch('/api/api-key', {
+                    method, headers: { Authorization: 'Bearer ' + session }
+                });
+                if (session !== authToken) return;
+                if (response.status === 401) { handleUnauthorized(); return; }
+                const data = await response.json();
+                if (session !== authToken) return;
+                if (!response.ok) throw new Error(data.error || '请求失败');
+                apiKeyEnabled = data.enabled;
+                clearApiKey();
+                status.textContent = data.enabled ? '已启用 · 仅限读取账户密钥' : '已停用';
+                if (data.enabled && data.source === 'environment') status.textContent += ' · 当前使用部署配置的 Key，重新生成后将替换它';
+                if (data.updatedAt) status.textContent += ' · 更新于 ' + new Date(data.updatedAt).toLocaleString();
+                generate.textContent = data.enabled ? '重新生成 API Key' : '生成 API Key';
+                if (data.apiKey && document.getElementById('apiKeyTab').classList.contains('active')) {
+                    document.getElementById('apiKeyValue').value = data.apiKey;
+                    document.getElementById('apiKeyReveal').classList.remove('hidden');
+                }
+                if (method !== 'GET') showFloatingMessage(data.enabled ? 'API Key 已生成，请复制保存' : 'API Key 已停用', 'success');
+            } catch (error) {
+                if (session === authToken) status.textContent = '操作失败：' + error.message + '。请刷新状态后重试。';
+            } finally {
+                apiKeyBusy = false;
+                generate.disabled = apiKeyEnabled === null;
+                disable.disabled = !apiKeyEnabled;
+                refresh.disabled = false;
+            }
+        }
+
+        async function copyApiKey() {
+            const input = document.getElementById('apiKeyValue');
+            if (!input.value) return;
+            try {
+                await navigator.clipboard.writeText(input.value);
+                showFloatingMessage('API Key 已复制', 'success');
+            } catch {
+                input.focus();
+                input.select();
+                showFloatingMessage('无法自动复制，已选中 Key，请手动复制', 'warning');
             }
         }
         
@@ -4580,10 +4738,10 @@ async function handleImport(request, env) {
 
 // 其他处理函数保持不变...
 async function handleAccounts(request, env) {
-    const corsHeaders = getCorsHeaders(request, env);
+    const corsHeaders = { ...getCorsHeaders(request, env), 'Cache-Control': 'no-store' };
     const authenticatedUser = await getAuthenticatedUser(request, env);
     
-    if (!authenticatedUser) {
+    if (!authenticatedUser && !(request.method === 'GET' && await hasValidApiToken(request, env))) {
         return new Response(JSON.stringify({ error: 'Unauthorized' }), {
             status: 401,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' }
@@ -5882,6 +6040,7 @@ export default {
             
             if (path === '/api/oauth/authorize') return await handleOAuthAuthorize(request, env);
             if (path === '/api/oauth/callback') return await handleOAuthCallback(request, env);
+            if (path === '/api/api-key') return await handleApiKey(request, env);
             if (path === '/api/accounts') return await handleAccounts(request, env);
             if (path === '/api/accounts/clear-all') return await handleClearAllAccounts(request, env);
             if (path.startsWith('/api/accounts/')) {

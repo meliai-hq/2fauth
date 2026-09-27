@@ -21,3 +21,4 @@ ALLOWED_ORIGINS = "https://2fa.meliai.app"
 
 # 用 wrangler secret put 设置 OAUTH_CLIENT_ID、OAUTH_CLIENT_SECRET、
 # JWT_SECRET 和 ENCRYPTION_KEY；不要把密钥写进此文件。
+# 推荐登录后在 API Key 面板生成只读 Key；可选 API_TOKEN Secret 仅在无面板配置时生效。

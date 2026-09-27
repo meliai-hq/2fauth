@@ -133,6 +133,75 @@ npx wrangler deploy
 如果出现本地与远程配置不一致的警告，请先修正配置再部署，避免覆盖控制台设置。
 回调变量名是 `OAUTH_REDIRECT_URI`（不是 `AUTH_REDIRECT_URI`）。
 
+### 使用 API Token 获取账户密钥
+
+部署此版本后，登录页面并打开 **🔑 API Key** 面板：
+
+1. 点击 **生成 API Key**，服务器生成一个随机 Key。
+2. 点击 **复制 API Key** 并保存在密码管理器中。完整 Key 仅在生成时返回；离开面板、
+   刷新或退出登录后无法再次查看。服务端 KV 只保存 SHA-256 摘要。
+3. 后续可在同一面板 **重新生成** 或 **停用**，不需要重新部署或设置 Worker Secret。
+
+管理接口 `GET /api/api-key`（查看状态）、`POST /api/api-key`（生成/轮换）、
+`DELETE /api/api-key`（停用）仅接受 OAuth 登录 JWT；API Key 本身无权管理配置。
+Key 不自动过期。轮换或停用由 Workers KV 同步，其他节点可能需要约 60 秒或更久
+才拒绝旧 Key；页面显示的是本次写入结果，不代表所有节点已经同步。
+
+兼容之前的部署方式：尚未在界面生成或停用 Key 时，也可配置独立的 `API_TOKEN`
+**Secret**（32–512 个字符），推荐使用 32 字节随机值：
+
+```bash
+openssl rand -hex 32
+npx wrangler secret put API_TOKEN
+npx wrangler deploy
+```
+
+将生成的值保存在密码管理器中，并在 `secret put` 的交互提示中输入。
+也可以在 Cloudflare 控制台的 **Variables and Secrets** 中添加同名 Secret。
+不要使用 `JWT_SECRET` 或 `ENCRYPTION_KEY` 作为 API Token。
+
+在调用端将 Token 放入环境变量 `API_TOKEN`，然后请求：
+
+```bash
+curl --fail-with-body -sS https://2fa.meliai.app/api/accounts \
+  -H "Authorization: Bearer $API_TOKEN"
+```
+
+返回格式如下（示例密钥仅用于演示）：
+
+```json
+{
+  "accounts": [
+    {
+      "id": "账户 UUID",
+      "service": "Example",
+      "account": "user@example.com",
+      "secret": "JBSWY3DPEHPK3PXP",
+      "digits": 6,
+      "period": 30
+    }
+  ]
+}
+```
+
+安装了 `jq` 时，可按账户 ID 提取密钥：
+
+```bash
+curl --fail-with-body -sS https://2fa.meliai.app/api/accounts \
+  -H "Authorization: Bearer $API_TOKEN" \
+  | jq -r --arg id "$ACCOUNT_ID" '.accounts[] | select(.id == $id) | .secret'
+```
+
+Token 仅支持 `GET /api/accounts`，可以读取当前单用户部署的**全部账户及长期密钥**，
+不支持新增、修改、删除账户、WebDAV、导出或 `/api/generate-totp`。
+返回结果带 `Cache-Control: no-store`。读取的 `secret` 是 Base32 长期密钥，不是当前验证码；
+可以在客户端用 TOTP 库按 `period`、`digits` 和 SHA-1 生成验证码。
+原有 OAuth JWT 调用方式仍然可用。
+
+一旦通过界面生成或停用 Key，界面配置优先，旧的 `API_TOKEN` Secret 不再生效，
+此后请在界面管理 Key。停用会保留一条配置记录，避免旧 Secret 被意外重新启用。
+没有有效 Key 或 Key 不匹配时返回 `401`，OAuth 登录不受影响。
+
 ### 其他 OAuth 服务
 
 `OAUTH_BASE_URL` 为 `https://github.com` 时使用：
